@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using CS.Core.Config;
 using CS.Core.Systems;
 using CS.Core.Networking;
+using CS.Core.Identity;
 
 namespace CS.UI
 {
@@ -17,7 +18,8 @@ namespace CS.UI
         public TMP_Text chatHistoryText;
         [Header("Canal do Chat")]
         [SerializeField] private TMP_Dropdown channelDropdown; // 0=Geral, 1=Sala, 2=Privado
-        [SerializeField] private TMP_InputField privateTarget; // username alvo para privado (opcional)
+        [SerializeField] private TMP_InputField privateTargetID; // username alvo para privado (opcional)
+        [SerializeField] private TMP_Dropdown membersDropdown;
         private InputField privateTargetLegacy;
         [SerializeField] private GameObject privateTargetContainer; // opcional: container para mostrar/esconder
         [SerializeField] private TMP_Text channelStatusText; // opcional: exibe canal atual
@@ -26,10 +28,22 @@ namespace CS.UI
         [SerializeField] private TMP_Text lobbyStatusText;
 
         [SerializeField] private ChronoSyncRCPWebSocket webSocket;
-        private string currentLobby;
+    private ChronoSyncCore core;
+    private GameSessionManager gsm;
+    private string currentLobby;
         private List<string> messages = new List<string>();
+        [Header("Histórico")]
+        [SerializeField] [Range(10, 500)] private int maxMessages = 40;
+    [Header("Cores do Chat")] 
+    [SerializeField] private string colorSelf = "#000000";        // preto
+    [SerializeField] private string colorAlly = "#1E3A8A";        // azul escuro
+    [SerializeField] private string colorEnemy = "#8B0000";       // vermelho escuro
+    [SerializeField] private string colorGlobal = "#FF8C00";      // laranja escuro
+    [SerializeField] private string colorPrivate = "#6A0DAD";     // roxo para mensagens privadas
         private enum ChatChannel { Global = 0, Room = 1, Privado = 2 }
         private ChatChannel currentChannel = ChatChannel.Room;
+    // Cache for dropdown mapping: display names -> player ids (same index)
+    private List<string> _dropdownIds = new List<string>();
 
         void Awake()
         {
@@ -61,8 +75,8 @@ namespace CS.UI
                 if (channelDropdown.value < 0 || channelDropdown.value > 2) channelDropdown.value = 1; // Sala por padrão
                 currentChannel = (ChatChannel)channelDropdown.value;
             }
-            if (privateTarget != null)
-                privateTarget.onValueChanged.AddListener(_ => { SaveLastPrivateTarget(); UpdateSendInteractable(); });
+            if (privateTargetID != null)
+                privateTargetID.onValueChanged.AddListener(_ => { SaveLastPrivateTarget(); UpdateSendInteractable(); });
             if (privateTargetLegacy != null)
                 privateTargetLegacy.onValueChanged.AddListener(_ => { SaveLastPrivateTarget(); UpdateSendInteractable(); });
 
@@ -88,9 +102,129 @@ namespace CS.UI
                 if (t != null) lobbyStatusText = t.GetComponent<TMPro.TMP_Text>();
             }
 
+            // Auto-bind privateTargetID if missing
+            if (privateTargetID == null)
+            {
+                Transform pt = null;
+                if (privateTargetContainer != null)
+                {
+                    pt = privateTargetContainer.transform.Find("PrivateTargetID") ?? privateTargetContainer.transform.GetComponentInChildren<TMPro.TMP_InputField>(true)?.transform;
+                }
+                if (pt == null)
+                {
+                    pt = transform.Find("PrivateTargetID");
+                }
+                if (pt != null)
+                {
+                    privateTargetID = pt.GetComponent<TMPro.TMP_InputField>();
+                }
+            }
+
+            // Resolve Core/GSM and subscribe to member changes for live dropdown updates
+            core = ChronoSyncCore.Instance != null ? ChronoSyncCore.Instance : FindObjectOfType<ChronoSyncCore>(true);
+            if (core != null)
+            {
+                core.OnMemberJoined += OnCoreMemberEvent;
+                core.OnMemberLeft += OnCoreMemberEvent;
+            }
+            gsm = GameSessionManager.Instance != null ? GameSessionManager.Instance : FindObjectOfType<GameSessionManager>(true);
+            if (gsm != null)
+            {
+                gsm.OnLobbyMembersChanged += OnGsmMembersChanged;
+            }
+
+            MembersDropdownUpdate(GetPlayerListByNames());
+
             RefreshChannelUI();
             UpdateSendInteractable();
             UpdateStatuses();
+        }
+
+        // Build member names list from Core if available, otherwise fallback to GSM
+        private List<string> GetPlayerListByNames()
+        {
+            var names = new List<string>();
+            if (core == null)
+            {
+                core = ChronoSyncCore.Instance != null ? ChronoSyncCore.Instance : FindObjectOfType<ChronoSyncCore>(true);
+            }
+            if (core != null)
+            {
+                try
+                {
+                    var list = core.GetPlayerListByName();
+                    if (list != null && list.Count > 0) names.AddRange(list);
+                }
+                catch { }
+            }
+            if (names.Count == 0)
+            {
+                if (gsm == null) gsm = GameSessionManager.Instance != null ? GameSessionManager.Instance : FindObjectOfType<GameSessionManager>(true);
+                if (gsm != null && gsm.lobbyMemberDisplayNames != null && gsm.lobbyMemberDisplayNames.Count > 0)
+                {
+                    names.AddRange(gsm.lobbyMemberDisplayNames);
+                }
+            }
+            return names;
+        }
+
+        private void OnCoreMemberEvent(string id)
+        {
+            MembersDropdownUpdate(GetPlayerListByNames());
+        }
+
+        private void OnCoreMemberEvent(string id, string displayName)
+        {
+            MembersDropdownUpdate(GetPlayerListByNames());
+        }
+
+        private void OnGsmMembersChanged(List<string> ids, List<string> names)
+        {
+            MembersDropdownUpdate(GetPlayerListByNames());
+        }
+
+        private void MembersDropdownUpdate(List<string> memberNames){
+            if (membersDropdown == null) return;
+            membersDropdown.ClearOptions();
+            if (memberNames == null || memberNames.Count == 0) return;
+            // Build aligned ids list from Core or GSM to map selection to player_id
+            _dropdownIds.Clear();
+            if (core != null)
+            {
+                try
+                {
+                    var ids = core.GetPlayerListById();
+                    if (ids != null) _dropdownIds.AddRange(ids);
+                }
+                catch { }
+            }
+            if (_dropdownIds.Count == 0 && gsm != null && gsm.lobbyMemberIds != null)
+            {
+                _dropdownIds.AddRange(gsm.lobbyMemberIds);
+            }
+            membersDropdown.AddOptions(memberNames);
+            membersDropdown.onValueChanged.RemoveAllListeners();
+            membersDropdown.onValueChanged.AddListener(index =>
+            {
+                if (index >= 0 && index < memberNames.Count)
+                {
+                    string selectedId = (index >= 0 && index < _dropdownIds.Count) ? _dropdownIds[index] : null;
+                    if (!string.IsNullOrEmpty(selectedId))
+                    {
+                        // Fill privateTargetID with the player ID instead of display name
+                        SetPrivateTarget(selectedId);
+                        SaveLastPrivateTarget();
+                        UpdateSendInteractable();
+                    }
+                }
+            });
+            // Also update the target immediately based on current selection (if any)
+            var curIdx = membersDropdown.value;
+            if (curIdx >= 0 && curIdx < _dropdownIds.Count)
+            {
+                var selectedId = _dropdownIds[curIdx];
+                if (!string.IsNullOrEmpty(selectedId)) SetPrivateTarget(selectedId);
+            }
         }
 
         void OnEnable()
@@ -103,10 +237,25 @@ namespace CS.UI
 
         public void SetLobby(string lobbyName)
         {
+            // Preserve history by default
+            SetLobby(lobbyName, preserveHistory: true);
+        }
+
+        // Overload to control whether chat history should be cleared when changing lobby
+        public void SetLobby(string lobbyName, bool preserveHistory)
+        {
+            bool leaving = string.IsNullOrEmpty(lobbyName);
             currentLobby = lobbyName;
-            messages.Clear();
-            if (chatHistoryText != null) chatHistoryText.text = "";
-            AppendSystem($"Entrou no lobby: {lobbyName}");
+            // Do not clear history — keep messages while player is online
+            // Only append a system note when joining a lobby or explicitly noting leave without clearing
+            if (!leaving)
+            {
+                AppendSystem($"Entrou no lobby: {lobbyName}");
+            }
+            else if (preserveHistory)
+            {
+                AppendSystem("Saiu do lobby.");
+            }
             UpdateSendInteractable();
             UpdateStatuses();
         }
@@ -154,7 +303,11 @@ namespace CS.UI
             {
                 if (TryExtractChatMessage(msg, out var player, out var message, out var timestamp))
                 {
-                    messages.Add($"[{timestamp}] {player}: {message}");
+                    var senderId = ExtractSenderIdFromJson(msg);
+                    var color = GetSenderColorHex(senderId, isGlobal:false);
+                    var line = $"<color={color}>[{timestamp}] {player}: {message}</color>";
+                    messages.Insert(0, line);
+                    EnforceHistoryLimit();
                     if (chatHistoryText != null)
                         chatHistoryText.text = string.Join("\n", messages);
                 }
@@ -163,7 +316,10 @@ namespace CS.UI
             {
                 if (TryExtractChatMessage(msg, out var player, out var message, out var timestamp))
                 {
-                    messages.Add($"[Geral] [{timestamp}] {player}: {message}");
+                    var color = GetSenderColorHex(null, isGlobal:true);
+                    var line = $"<color={color}>[Geral] [{timestamp}] {player}: {message}</color>";
+                    messages.Insert(0, line);
+                    EnforceHistoryLimit();
                     if (chatHistoryText != null)
                         chatHistoryText.text = string.Join("\n", messages);
                 }
@@ -174,18 +330,18 @@ namespace CS.UI
                 string fromDisplay = ResolveDisplayName(from);
                 if (TryExtractChatMessage(msg, out var player, out var message, out var timestamp))
                 {
-                    messages.Add($"[Privado] [{timestamp}] {fromDisplay}: {message}");
+                    // Mensagens privadas usam SEMPRE a cor privada, independente da relação
+                    var line = $"<color={colorPrivate}>[Privado] [{timestamp}] {fromDisplay}: {message}</color>";
+                    messages.Insert(0, line);
+                    EnforceHistoryLimit();
                     if (chatHistoryText != null)
                         chatHistoryText.text = string.Join("\n", messages);
                 }
             }
             else if (msg.Contains("\"event\":\"chat_history\""))
             {
-                messages.Clear();
-                if (chatHistoryText != null)
-                    chatHistoryText.text = "";
-                // Aqui você pode adaptar para extrair o array de mensagens do JSON recebido
-                AppendSystem("Histórico do chat carregado.");
+                // Preserve existing history; optionally merge server history here if needed
+                AppendSystem("Histórico do chat atualizado.");
             }
         }
 
@@ -273,9 +429,96 @@ namespace CS.UI
         private void AppendSystem(string msg)
         {
             var line = $"[system] {msg}";
-            messages.Add(line);
+            messages.Insert(0, line);
+            EnforceHistoryLimit();
             if (chatHistoryText != null)
                 chatHistoryText.text = string.Join("\n", messages);
+        }
+
+        private void EnforceHistoryLimit()
+        {
+            if (maxMessages <= 0) return;
+            if (messages.Count > maxMessages)
+            {
+                // messages are newest-first, so remove the tail (oldest entries)
+                messages.RemoveRange(maxMessages, messages.Count - maxMessages);
+            }
+        }
+
+        private string ExtractSenderIdFromJson(string json)
+        {
+            int keyIdx = json.IndexOf("\"message\":{", System.StringComparison.Ordinal);
+            if (keyIdx == -1) return ExtractJsonValue(json, "player_id");
+            int objStart = json.IndexOf('{', keyIdx);
+            if (objStart == -1) return string.Empty;
+            int depth = 0;
+            int i = objStart;
+            for (; i < json.Length; i++)
+            {
+                if (json[i] == '{') depth++;
+                else if (json[i] == '}')
+                {
+                    depth--;
+                    if (depth == 0) { i++; break; }
+                }
+            }
+            if (depth != 0) return string.Empty;
+            string obj = json.Substring(objStart, i - objStart);
+            return ExtractJsonValue(obj, "player_id");
+        }
+
+        private string GetSenderColorHex(string senderId, bool isGlobal)
+        {
+            if (isGlobal) return colorGlobal;
+            // Determine local id
+            string localId = null;
+            if (webSocket != null)
+                localId = string.IsNullOrEmpty(webSocket.assignedPlayerId) ? webSocket.playerId : webSocket.assignedPlayerId;
+            if (string.IsNullOrEmpty(localId) && GameSessionManager.Instance != null)
+                localId = GameSessionManager.Instance.localPlayerId;
+
+            if (!string.IsNullOrEmpty(senderId) && !string.IsNullOrEmpty(localId) && string.Equals(senderId, localId, System.StringComparison.Ordinal))
+                return colorSelf;
+
+            // Try to determine relation via PlayerIdentity teams
+            var localIdentity = PlayerIdentity.Local;
+            PlayerIdentity other = null;
+            if (!string.IsNullOrEmpty(senderId))
+            {
+                // Try PlayerSpawner lookup first
+                var spawner = GameSessionManager.Instance != null ? GameSessionManager.Instance.spawner : null;
+                if (spawner != null && spawner.TryGetSpawned(senderId, out var go) && go != null)
+                {
+                    other = go.GetComponentInChildren<PlayerIdentity>();
+                }
+                if (other == null)
+                {
+                    // Fallback: scan scene for PlayerIdentity with matching id
+                    var all = GameObject.FindObjectsOfType<PlayerIdentity>(true);
+                    for (int k = 0; k < all.Length; k++)
+                    {
+                        if (all[k] != null && all[k].PlayerId == senderId) { other = all[k]; break; }
+                    }
+                }
+            }
+
+            if (localIdentity != null && other != null)
+            {
+                if (localIdentity.Team != Team.Neutral && other.Team != Team.Neutral)
+                {
+                    if (localIdentity.Team == other.Team) return colorAlly;
+                    return colorEnemy;
+                }
+            }
+
+            // Fallback color for others when relation unknown
+            return colorAlly;
+        }
+
+        // Public wrapper to allow other components to append system messages
+        public void AppendSystemMessage(string msg)
+        {
+            AppendSystem(msg);
         }
 
         private void UpdateSendInteractable()
@@ -293,14 +536,14 @@ namespace CS.UI
 
         private string GetPrivateTarget()
         {
-            if (privateTarget != null) return privateTarget.text;
+            if (privateTargetID != null) return privateTargetID.text;
             if (privateTargetLegacy != null) return privateTargetLegacy.text;
             return string.Empty;
         }
 
         private void SetPrivateTarget(string value)
         {
-            if (privateTarget != null) privateTarget.text = value;
+            if (privateTargetID != null) privateTargetID.text = value;
             if (privateTargetLegacy != null) privateTargetLegacy.text = value;
         }
 
@@ -311,6 +554,16 @@ namespace CS.UI
             RefreshChannelUI();
             UpdateSendInteractable();
             UpdateStatuses();
+            // If switching to Private, prefill target with current dropdown selection
+            if (currentChannel == ChatChannel.Privado && membersDropdown != null && _dropdownIds != null)
+            {
+                var idx = membersDropdown.value;
+                if (idx >= 0 && idx < _dropdownIds.Count)
+                {
+                    var selectedId = _dropdownIds[idx];
+                    if (!string.IsNullOrEmpty(selectedId)) SetPrivateTarget(selectedId);
+                }
+            }
         }
 
         private void RefreshChannelUI()
@@ -320,7 +573,7 @@ namespace CS.UI
             else
             {
                 // Se não tem container, mostrar/ocultar os campos diretamente
-                if (privateTarget != null) privateTarget.gameObject.SetActive(showPrivate);
+                if (privateTargetID != null) privateTargetID.gameObject.SetActive(showPrivate);
                 if (privateTargetLegacy != null) privateTargetLegacy.gameObject.SetActive(showPrivate);
             }
 
@@ -366,6 +619,15 @@ namespace CS.UI
         {
             if (webSocket != null)
                 webSocket.OnMessageReceived -= OnWebSocketMessage;
+            if (core != null)
+            {
+                core.OnMemberJoined -= OnCoreMemberEvent;
+                core.OnMemberLeft -= OnCoreMemberEvent;
+            }
+            if (gsm != null)
+            {
+                gsm.OnLobbyMembersChanged -= OnGsmMembersChanged;
+            }
         }
     }
 }

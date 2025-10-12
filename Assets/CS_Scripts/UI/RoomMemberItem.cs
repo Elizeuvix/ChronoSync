@@ -76,9 +76,8 @@ namespace CS.UI
 
             // Notify listeners to remove the player from the lobby/session
             KickRequested?.Invoke(_memberName);
-
-            // Remove this UI item from the list
-            Destroy(gameObject);
+            // Do NOT destroy UI immediately; wait for server to confirm removal via events,
+            // so the list stays consistent if the action is denied or fails.
         }
         public void SetKickAction(UnityEngine.Events.UnityAction action)
         {

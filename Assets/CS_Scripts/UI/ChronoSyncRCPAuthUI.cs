@@ -27,7 +27,7 @@ namespace CS.UI
         private ChronoSyncRCPAuth auth;
         public ChronoSyncRCPWebSocket webSocket;
 
-        private Message message;
+    [SerializeField] private Message message;
 
         void Start()
         {
@@ -36,7 +36,12 @@ namespace CS.UI
             Debug.Log($"registerButton type: {registerButton?.GetType()}");
             Debug.Log($"loginButton type: {loginButton?.GetType()}");
 
-            message = GameObject.Find("PanelMessage").GetComponent<Message>();
+            if (message == null)
+            {
+                var go = GameObject.Find("PanelMessage");
+                if (go != null) message = go.GetComponent<Message>();
+                if (message == null) message = FindObjectOfType<Message>(true);
+            }
             webSocket = GameObject.FindGameObjectWithTag("Systems").GetComponent<ChronoSyncRCPWebSocket>();
 
             // Ativa/desativa paineis somente se informados
@@ -151,7 +156,8 @@ namespace CS.UI
 
         private void SetStatus(string text)
         {
-            message.SetMessage(text);
+            if (message == null) message = FindObjectOfType<Message>(true);
+            if (message != null) message.SetMessage(text);
         }
     }
 }

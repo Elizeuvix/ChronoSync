@@ -9,6 +9,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 4741124759753695912}
+  - component: {fileID: 1050898916695226799}
   - component: {fileID: 5424379098993443434}
   - component: {fileID: 1514553015944989979}
   - component: {fileID: 8544222500816552353}
@@ -36,6 +37,24 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1050898916695226799
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 4989800670274012936}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 568c157d2aac83c47bceabfa14855faa, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  roomName: 
+  maxPlayers: 2
+  playerCount: 0
+  applyDefaultsFromConfig: 1
+  gameSessionManager: {fileID: 0}
+  webSocket: {fileID: 0}
 --- !u!114 &5424379098993443434
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -66,11 +85,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   spawner: {fileID: 0}
-  webSocket: {fileID: 0}
+  webSocket: {fileID: 8076520562173265452}
   localPlayerId: 
   localNickname: 
   localTeam: 1
   currentLobby: 
+  lobbyMemberIds: []
+  lobbyMemberDisplayNames: []
   defaultRemoteTeam: 0
   matchSceneNames:
   - level1

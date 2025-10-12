@@ -15,7 +15,8 @@ namespace CS.UI
         [SerializeField] private Transform content; // Parent for member items
         [SerializeField] private GameObject memberItemPrefab; // Row prefab with TMP_Text + optional Kick Button
         [SerializeField] private TMP_Text headerText; // Optional: shows lobby name
-
+        [SerializeField] private Button cancelButton; 
+        [SerializeField] private Message messageUI; // Optional: assign if Message is located elsewhere in the scene
         [Header("Start Match")]
         [SerializeField] private Button startMatchButton; // Botão "Iniciar partida"
         [Tooltip("Apenas o host pode iniciar a partida")]
@@ -24,6 +25,7 @@ namespace CS.UI
         [SerializeField] private string gameSceneName = "";
 
         private ChronoSyncRCPWebSocket webSocket;
+    private ChronoSyncCore coreRef;
         private string currentLobby = "";
         private class MemberInfo { public string id; public string name; }
         private readonly List<MemberInfo> members = new List<MemberInfo>();
@@ -40,10 +42,26 @@ namespace CS.UI
                 webSocket.OnMessageReceived += OnWsMessage;
             }
 
+            // Subscribe to Core owner changes to refresh Kick visibility when server sets owner_id
+            coreRef = ChronoSyncCore.Instance != null ? ChronoSyncCore.Instance : FindObjectOfType<ChronoSyncCore>(true);
+            if (coreRef != null)
+            {
+                coreRef.OnOwnerChanged -= HandleOwnerChanged;
+                coreRef.OnOwnerChanged += HandleOwnerChanged;
+                coreRef.OnIsInRoomChanged -= HandleIsInRoomChanged;
+                coreRef.OnIsInRoomChanged += HandleIsInRoomChanged;
+            }
+
             if (startMatchButton != null)
             {
                 startMatchButton.onClick.RemoveAllListeners();
                 startMatchButton.onClick.AddListener(OnStartMatchClicked);
+            }
+
+            if (cancelButton != null)
+            {
+                cancelButton.onClick.RemoveAllListeners();
+                cancelButton.onClick.AddListener(OnCancelClicked);
             }
 
             Hide();
@@ -60,6 +78,27 @@ namespace CS.UI
                 webSocket.OnMessageReceived -= OnWsMessage;
             if (startMatchButton != null)
                 startMatchButton.onClick.RemoveListener(OnStartMatchClicked);
+            if (cancelButton != null)
+                cancelButton.onClick.RemoveListener(OnCancelClicked);
+            if (coreRef != null)
+            {
+                coreRef.OnOwnerChanged -= HandleOwnerChanged;
+                coreRef.OnIsInRoomChanged -= HandleIsInRoomChanged;
+            }
+        }
+
+        private void HandleOwnerChanged(string newOwnerId)
+        {
+            // Rebuild UI to update Kick visibility when ownership changes/promotes
+            RebuildUI();
+        }
+
+        private void HandleIsInRoomChanged(bool inRoom)
+        {
+            if (!inRoom)
+            {
+                Hide();
+            }
         }
 
         public void ShowForLobby(string lobby)
@@ -171,12 +210,56 @@ namespace CS.UI
                 var lobby = ExtractJsonValue(msg, "lobby");
                 if (lobby != currentLobby) return;
                 var pid = ExtractJsonValue(msg, "player_id");
+                // Try to determine the display name of the player leaving before we mutate the list
+                string removedName = null;
+                if (!string.IsNullOrEmpty(pid))
+                {
+                    var existing = members.Find(m => m.id == pid);
+                    if (existing != null) removedName = existing.name;
+                    if (string.IsNullOrEmpty(removedName))
+                    {
+                        var maybeName = ExtractJsonValue(msg, "display_name");
+                        if (string.IsNullOrWhiteSpace(maybeName)) maybeName = ExtractJsonValue(msg, "player_name");
+                        if (!string.IsNullOrWhiteSpace(maybeName)) removedName = maybeName;
+                    }
+                    if (string.IsNullOrEmpty(removedName)) removedName = pid;
+                }
+                // If it's me, immediately leave to Lobby panel and notify
+                if (webSocket != null)
+                {
+                    var localId = string.IsNullOrEmpty(webSocket.assignedPlayerId) ? webSocket.playerId : webSocket.assignedPlayerId;
+                    if (!string.IsNullOrEmpty(localId) && string.Equals(pid, localId, System.StringComparison.Ordinal))
+                    {
+                        var lobbyUi = FindObjectOfType<ChronoSyncRCPLobby>(true);
+                        if (lobbyUi != null)
+                        {
+                            if (lobbyUi.gameObject.activeInHierarchy)
+                            {
+                                // Show browser and hide this panel
+                                lobbyUi.CancelLobby(); // ensures proper teardown and UI state
+                            }
+                            else
+                            {
+                                Hide();
+                            }
+                        }
+                        var msgUi = messageUI != null ? messageUI : FindObjectOfType<Message>(true);
+                        if (msgUi != null) msgUi.SetMessage("Você foi removido do lobby pelo host.");
+                        return;
+                    }
+                }
                 int idx = members.FindIndex(m => m.id == pid);
                 if (!string.IsNullOrEmpty(pid) && idx >= 0)
                 {
                     members.RemoveAt(idx);
                     RebuildUI();
                     NotifyCountAndRefreshButton();
+                    // Notify others with the removed player's display name
+                    if (!string.IsNullOrEmpty(removedName))
+                    {
+                        var msgUi = messageUI != null ? messageUI : FindObjectOfType<Message>(true);
+                        if (msgUi != null) msgUi.SetMessage($"{removedName} foi removido do lobby.");
+                    }
                 }
             }
             else if (msg.Contains("\"event\":\"lobby_closed\""))
@@ -241,26 +324,67 @@ namespace CS.UI
             if (content == null || memberItemPrefab == null) return;
             ClearUI();
             DeduplicateAndPreferNames();
-            var lobbyScript = FindObjectOfType<ChronoSyncRCPLobby>(true);
-            bool isHost = lobbyScript != null && lobbyScript.IsHost;
+            bool isHost = false;
+            var core = ChronoSyncCore.Instance != null ? ChronoSyncCore.Instance : coreRef;
+            var localId = string.IsNullOrEmpty(webSocket.assignedPlayerId) ? webSocket.playerId : webSocket.assignedPlayerId;
+            if (core != null && !string.IsNullOrEmpty(localId))
+            {
+                // Prefer server-truth when available
+                var ownerId = core.GetLobbyOwnerId();
+                if (!string.IsNullOrEmpty(ownerId))
+                {
+                    isHost = string.Equals(ownerId, localId, System.StringComparison.Ordinal);
+                }
+            }
+            if (!isHost)
+            {
+                // Fallback to UI state in case owner_id hasn't arrived yet (server will enforce permissions anyway)
+                var lobbyScript = FindObjectOfType<ChronoSyncRCPLobby>(true);
+                if (lobbyScript != null) isHost = lobbyScript.IsHost;
+            }
             foreach (var m in members)
             {
                 var go = GameObject.Instantiate(memberItemPrefab, content);
-                var text = go.GetComponentInChildren<TMP_Text>();
-                if (text != null) text.text = m.name;
-                // If prefab has a Button as child named "KickButton", wire it when host and not self
-                if (isHost)
+                // Preferred path: RoomMemberItem component controls its own UI
+                var item = go.GetComponent<RoomMemberItem>();
+                if (item != null)
                 {
-                    var btn = go.transform.Find("KickButton")?.GetComponent<Button>();
+                    bool canKick = isHost && !string.IsNullOrEmpty(localId) && localId != m.id;
+                    item.Setup(m.name, canKick);
+                    item.SetKickAction(canKick ? (UnityEngine.Events.UnityAction)(() => KickMember(m.id)) : null);
+                }
+                else
+                {
+                    // Fallback: text field + manual kick button
+                    var text = go.GetComponentInChildren<TMP_Text>();
+                    if (text != null) text.text = m.name;
+                    // Try common names/paths for the kick button
+                    Button btn = null;
+                    var t1 = go.transform.Find("KickButton");
+                    if (t1 != null) btn = t1.GetComponent<Button>();
+                    if (btn == null)
+                    {
+                        var t2 = go.transform.Find("ButtonKick");
+                        if (t2 != null) btn = t2.GetComponent<Button>();
+                    }
+                    if (btn == null)
+                    {
+                        // last resort: scan children for a button with name containing 'kick'
+                        foreach (var b in go.GetComponentsInChildren<Button>(true))
+                        {
+                            if (b != null && b.name.ToLowerInvariant().Contains("kick"))
+                            {
+                                btn = b; break;
+                            }
+                        }
+                    }
+                    bool canKick = isHost && !string.IsNullOrEmpty(localId) && localId != m.id;
                     if (btn != null)
                     {
-                        // don't allow kicking self (assumes LocalPlayerId is known via webSocket.assignedPlayerId)
-                        var localId = string.IsNullOrEmpty(webSocket.assignedPlayerId) ? webSocket.playerId : webSocket.assignedPlayerId;
-                        bool canKick = !string.IsNullOrEmpty(localId) && localId != m.id;
                         btn.gameObject.SetActive(canKick);
+                        btn.onClick.RemoveAllListeners();
                         if (canKick)
                         {
-                            btn.onClick.RemoveAllListeners();
                             btn.onClick.AddListener(() => KickMember(m.id));
                         }
                     }
@@ -328,6 +452,32 @@ namespace CS.UI
             {
                 Debug.LogError($"[LobbyMembersPanel] Falha ao carregar cena '{gameSceneName}': {ex.Message}");
             }
+        }
+
+        private void OnCancelClicked()
+        {
+            // Prefer delegating to the Lobby controller to handle UI and server event
+            var lobbyUi = FindObjectOfType<ChronoSyncRCPLobby>(true);
+            if (lobbyUi != null)
+            {
+                lobbyUi.CancelLobby();
+                return;
+            }
+
+            // Fallback: send leave and hide this panel
+            if (!string.IsNullOrEmpty(currentLobby))
+            {
+                var core = ChronoSyncCore.Instance;
+                if (core != null)
+                {
+                    core.LeaveRoom(currentLobby);
+                }
+                else if (webSocket != null && webSocket.IsConnected)
+                {
+                    webSocket.Send($"{{\"event\":\"leave_lobby\",\"lobby\":\"{Escape(currentLobby)}\"}}");
+                }
+            }
+            Hide();
         }
 
         private string Escape(string s) => string.IsNullOrEmpty(s) ? string.Empty : s.Replace("\\", "\\\\").Replace("\"", "\\\"");
@@ -413,9 +563,41 @@ namespace CS.UI
 
         private void KickMember(string playerId)
         {
-            if (webSocket == null || string.IsNullOrEmpty(currentLobby) || string.IsNullOrEmpty(playerId)) return;
-            var payload = $"{{\"event\":\"remove_from_lobby\",\"lobby\":\"{Escape(currentLobby)}\",\"player_id\":\"{Escape(playerId)}\"}}";
-            webSocket.Send(payload);
+            if (string.IsNullOrEmpty(currentLobby) || string.IsNullOrEmpty(playerId)) return;
+            var core = ChronoSyncCore.Instance;
+            if (core != null)
+            {
+                // Before kicking, broadcast a chat message to the room so all members see who was removed
+                TryAnnounceKickViaChat(playerId);
+                // Explicit host kick for determinism
+                core.KickPlayer(playerId);
+                return;
+            }
+            // Fallback: direct WS call
+            if (webSocket != null)
+            {
+                TryAnnounceKickViaChat(playerId);
+                var payload = $"{{\"event\":\"remove_from_lobby\",\"lobby\":\"{Escape(currentLobby)}\",\"player_id\":\"{Escape(playerId)}\"}}";
+                webSocket.Send(payload);
+            }
+        }
+
+        private void TryAnnounceKickViaChat(string playerId)
+        {
+            try
+            {
+                if (webSocket == null || !webSocket.IsConnected) return;
+                if (string.IsNullOrEmpty(currentLobby)) return;
+                // Resolve a friendly display name for the target
+                string display = null;
+                var m = members != null ? members.Find(x => x.id == playerId) : null;
+                if (m != null && !string.IsNullOrWhiteSpace(m.name)) display = m.name;
+                if (string.IsNullOrEmpty(display)) display = playerId;
+                string msg = $"{display} foi removido do lobby pelo host.";
+                var chatPayload = $"{{\"event\":\"chat_message\",\"lobby\":\"{Escape(currentLobby)}\",\"message\":\"{Escape(msg)}\"}}";
+                webSocket.Send(chatPayload);
+            }
+            catch { }
         }
     }
 

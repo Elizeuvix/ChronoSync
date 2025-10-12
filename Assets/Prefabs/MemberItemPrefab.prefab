@@ -222,7 +222,7 @@ GameObject:
   - component: {fileID: 6623229877065667162}
   - component: {fileID: 7197969328312195051}
   m_Layer: 5
-  m_Name: ButtonKick
+  m_Name: KickButton
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0

@@ -40,6 +40,7 @@ namespace CS.Core.Systems
         public Team localTeam = Team.TeamA;
         [Header("Lobby")]
         public string currentLobby;
+    public event System.Action<string> OnCurrentLobbyChanged; // fires when currentLobby changes
     [Header("Lobby Members (read-only order-aligned)")]
     public System.Collections.Generic.List<string> lobbyMemberIds = new System.Collections.Generic.List<string>();
     public System.Collections.Generic.List<string> lobbyMemberDisplayNames = new System.Collections.Generic.List<string>();
@@ -143,7 +144,14 @@ namespace CS.Core.Systems
             if (msg.Contains("\"event\":\"match_start\"") || msg.Contains("\"event\":\"join_lobby\""))
             {
                 var lobby = ExtractJsonValue(msg, "lobby");
-                if (!string.IsNullOrEmpty(lobby)) currentLobby = lobby;
+                if (!string.IsNullOrEmpty(lobby))
+                {
+                    if (!string.Equals(currentLobby, lobby, System.StringComparison.Ordinal))
+                    {
+                        currentLobby = lobby;
+                        OnCurrentLobbyChanged?.Invoke(currentLobby);
+                    }
+                }
             }
 
             // Recebe lista completa de membros do lobby
@@ -200,6 +208,11 @@ namespace CS.Core.Systems
                     spawner.DespawnAllExcept(localPlayerId);
                 }
                 ClearLobbyMembers();
+                if (!string.IsNullOrEmpty(currentLobby))
+                {
+                    currentLobby = string.Empty;
+                    OnCurrentLobbyChanged?.Invoke(currentLobby);
+                }
             }
 
             // Opcional: se vier uma lista de membros, hidratar todos (formato esperado simplificado)
@@ -363,10 +376,18 @@ namespace CS.Core.Systems
             int arrEnd = json.IndexOf(']', arrStart + 1);
             if (arrStart == -1 || arrEnd == -1 || arrEnd <= arrStart) return result;
             var inner = json.Substring(arrStart + 1, arrEnd - arrStart - 1);
+
+            // If array contains objects (e.g., {"player_id":"..."}), do NOT treat as string array
+            if (inner.IndexOf('{') != -1) return result;
+
             var parts = inner.Split(',');
-            foreach (var p in parts)
+            foreach (var token in parts)
             {
-                var s = p.Trim().Trim('"');
+                var t = token.Trim();
+                if (t.Length == 0) continue;
+                // Only accept proper string literals: "value"
+                if (!(t[0] == '"' && t[t.Length - 1] == '"')) continue;
+                var s = t.Substring(1, t.Length - 2);
                 if (!string.IsNullOrEmpty(s)) result.Add(s);
             }
             return result;
@@ -394,6 +415,8 @@ namespace CS.Core.Systems
                 if (string.IsNullOrEmpty(pid)) continue;
                 string name = ExtractJsonValue(block, "display_name");
                 if (string.IsNullOrEmpty(name)) name = ExtractJsonValue(block, "player_name");
+                // sanitize accidental JSON fragments
+                if (pid.StartsWith("{") || pid.StartsWith("[")) continue;
                 string candidate = string.IsNullOrWhiteSpace(name) ? pid : name;
                 if (map.TryGetValue(pid, out var existing))
                 {
@@ -412,6 +435,7 @@ namespace CS.Core.Systems
                 {
                     var pid = ids[i];
                     if (string.IsNullOrEmpty(pid)) continue;
+                    if (pid.StartsWith("{") || pid.StartsWith("[")) continue;
                     if (!map.ContainsKey(pid)) map[pid] = pid;
                 }
             }
@@ -425,8 +449,12 @@ namespace CS.Core.Systems
             lobbyMemberDisplayNames.Clear();
             foreach (var kv in idToName)
             {
+                if (string.IsNullOrWhiteSpace(kv.Key)) continue;
+                // Filter out tokens that look like embedded JSON fragments
+                if (kv.Key.StartsWith("{") || kv.Key.StartsWith("[")) continue;
+                var value = string.IsNullOrWhiteSpace(kv.Value) ? kv.Key : kv.Value;
                 lobbyMemberIds.Add(kv.Key);
-                lobbyMemberDisplayNames.Add(kv.Value);
+                lobbyMemberDisplayNames.Add(value);
             }
             OnLobbyMembersChanged?.Invoke(lobbyMemberIds, lobbyMemberDisplayNames);
         }
@@ -434,6 +462,7 @@ namespace CS.Core.Systems
         private void UpsertLobbyMember(string id, string name)
         {
             if (string.IsNullOrEmpty(id)) return;
+            if (id.StartsWith("{") || id.StartsWith("[")) return; // ignore malformed token
             int idx = lobbyMemberIds.IndexOf(id);
             string candidate = string.IsNullOrWhiteSpace(name) ? id : name;
             if (idx < 0)

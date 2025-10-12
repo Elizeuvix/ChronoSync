@@ -14,7 +14,8 @@ namespace CS.UI
         [SerializeField] private TMP_InputField lobbyNameTMP;
         private InputField lobbyNameInput;
         [Header("Configuração do Lobby")]
-        [SerializeField] private TMP_InputField maxPlayersTMP; // opcional: campo numérico no UI para capacidade
+    [SerializeField] private TMP_InputField maxPlayersTMP; // opcional: campo numérico no UI para capacidade (TMP)
+    [SerializeField] private InputField maxPlayersInput;   // opcional: alternativa UGUI InputField
         [Range(2, 500)] public int maxPlayers = 2; // valor padrão se não houver campo
         public TMP_Text statusText;
         public ChronoSyncRCPWebSocket webSocket;
@@ -26,16 +27,22 @@ namespace CS.UI
         [Header("UI Containers")]
         [SerializeField] private GameObject lobbyBrowserRoot; // Painel com lista/criação de lobby
         [SerializeField] private ChronoSyncRCPLobbyMembersPanel lobbyMembersPanel; // Painel de membros (pode estar inativo)
+    [SerializeField] private Message messageUI; // Optional: assign if Message UI lives elsewhere
 
         private bool isHost = false;
         private bool playerJoined = false;
         private System.Collections.Generic.List<string> availableLobbies = new System.Collections.Generic.List<string>();
         private ChronoSyncRCPLobbyMembersPanel membersPanel;
         private string currentLobbyName = string.Empty;
+    // Track list items and member counts for real-time updates
+    private System.Collections.Generic.Dictionary<string, LobbyListItem> lobbyItems = new System.Collections.Generic.Dictionary<string, LobbyListItem>(System.StringComparer.Ordinal);
+    private System.Collections.Generic.Dictionary<string, int> lobbyCounts = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
+    private System.Collections.Generic.Dictionary<string, int> lobbyMaxPlayers = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.Ordinal);
 
         // Expor status para outros componentes (somente leitura)
         public bool IsHost => isHost;
         public string CurrentLobby => currentLobbyName;
+    private ChronoSyncCore coreRef;
 
         private void Awake()
         {
@@ -60,6 +67,9 @@ namespace CS.UI
                 membersPanel = lobbyMembersPanel;
             else
                 membersPanel = FindObjectOfType<ChronoSyncRCPLobbyMembersPanel>(true);
+
+            // Core reference for room state
+            coreRef = ChronoSyncCore.Instance != null ? ChronoSyncCore.Instance : FindObjectOfType<ChronoSyncCore>(true);
         }
 
         private void OnEnable()
@@ -78,6 +88,14 @@ namespace CS.UI
                 if (webSocket.IsConnected)
                     webSocket.Send("{\"event\":\"request_lobby_list\"}");
             }
+
+            // Subscribe to Core room-state changes
+            if (coreRef == null) coreRef = ChronoSyncCore.Instance != null ? ChronoSyncCore.Instance : FindObjectOfType<ChronoSyncCore>(true);
+            if (coreRef != null)
+            {
+                coreRef.OnIsInRoomChanged -= HandleIsInRoomChanged;
+                coreRef.OnIsInRoomChanged += HandleIsInRoomChanged;
+            }
         }
 
         private void OnDisable()
@@ -86,6 +104,10 @@ namespace CS.UI
             {
                 webSocket.OnMessageReceived -= OnWebSocketMessage;
                 webSocket.OnConnected -= OnWsConnected;
+            }
+            if (coreRef != null)
+            {
+                coreRef.OnIsInRoomChanged -= HandleIsInRoomChanged;
             }
         }
 
@@ -112,6 +134,41 @@ namespace CS.UI
                 }
             }
             catch { }
+        }
+
+        // Return to lobby browser because the local user was kicked; do not send cancel/leave back to server
+        public void ReturnToBrowserDueToKick(string reasonMessage = null)
+        {
+            // Update status text
+            if (statusText != null)
+                statusText.text = string.IsNullOrEmpty(reasonMessage) ? "Você foi removido do lobby." : reasonMessage;
+
+            // Reset local lobby state
+            string kickedFrom = currentLobbyName;
+            isHost = false;
+            playerJoined = false;
+            currentLobbyName = string.Empty;
+
+            // UI: show lobby browser and hide members panel
+            if (lobbyBrowserRoot != null) lobbyBrowserRoot.SetActive(true);
+            if (membersPanel != null) membersPanel.Hide();
+
+            // Clear lobby in chat
+            var chat = FindObjectOfType<ChronoSyncRCPChat>(true);
+            if (chat != null) chat.SetLobby("", preserveHistory: true);
+
+            // Notify via Message UI if exists
+            var msgUi = messageUI != null ? messageUI : FindObjectOfType<Message>(true);
+            if (msgUi != null)
+            {
+                msgUi.SetMessage(string.IsNullOrEmpty(reasonMessage) ? "Você foi removido do lobby pelo host." : reasonMessage);
+            }
+
+            // Refresh lobby list for the browser
+            if (webSocket != null && webSocket.IsConnected)
+            {
+                try { webSocket.Send("{\"event\":\"request_lobby_list\"}"); } catch {}
+            }
         }
         public void CancelLobby()
         {
@@ -142,7 +199,29 @@ namespace CS.UI
             // Limpar lobby no chat para refletir estado
             var chat = FindObjectOfType<ChronoSyncRCPChat>();
             if (chat != null)
-                chat.SetLobby("");
+                chat.SetLobby("", preserveHistory: true);
+        }
+
+        private void HandleIsInRoomChanged(bool inRoom)
+        {
+            if (!inRoom)
+            {
+                // Neutral UI transition to browser when leaving any room
+                if (statusText != null) statusText.text = "Fora do lobby.";
+                isHost = false;
+                playerJoined = false;
+                currentLobbyName = string.Empty;
+                if (lobbyBrowserRoot != null) lobbyBrowserRoot.SetActive(true);
+                if (membersPanel != null) membersPanel.Hide();
+                // Clear lobby in chat to reflect state
+                var chat = FindObjectOfType<ChronoSyncRCPChat>(true);
+                if (chat != null) chat.SetLobby("", preserveHistory: true);
+                // Refresh list to reflect latest rooms
+                if (webSocket != null && webSocket.IsConnected)
+                {
+                    try { webSocket.Send("{\"event\":\"request_lobby_list\"}"); } catch {}
+                }
+            }
         }
 
         public void CreateLobby()
@@ -153,16 +232,29 @@ namespace CS.UI
                 Debug.LogWarning("[ChronoSyncRCPLobby] Nenhum campo de nome de lobby atribuído ou vazio (TMP_InputField ou InputField).");
                 return;
             }
-            // Se houver um campo TMP para max players, tentar parsear
-            if (maxPlayersTMP != null && !string.IsNullOrWhiteSpace(maxPlayersTMP.text))
+            // Ler MaxPlayers a partir dos campos configurados (TMP ou UGUI)
+            bool foundMax = false;
+            if (maxPlayersTMP != null)
             {
-                if (int.TryParse(maxPlayersTMP.text, out var parsed))
+                var txt = maxPlayersTMP.text;
+                if (!string.IsNullOrWhiteSpace(txt) && int.TryParse(txt, out var parsedTMP))
                 {
-                    maxPlayers = Mathf.Clamp(parsed, 2, 500);
+                    maxPlayers = Mathf.Clamp(parsedTMP, 2, 500);
+                    foundMax = true;
                 }
             }
-            else
+            if (!foundMax && maxPlayersInput != null)
             {
+                var txt = maxPlayersInput.text;
+                if (!string.IsNullOrWhiteSpace(txt) && int.TryParse(txt, out var parsedUI))
+                {
+                    maxPlayers = Mathf.Clamp(parsedUI, 2, 500);
+                    foundMax = true;
+                }
+            }
+            if (!foundMax)
+            {
+                // Sem campos, mantém valor atual mas garantindo faixa
                 maxPlayers = Mathf.Clamp(maxPlayers, 2, 500);
             }
             if (webSocket == null)
@@ -175,11 +267,23 @@ namespace CS.UI
                 statusText.text = $"Lobby '{lobbyName}' criado. Aguardando outro jogador...";
             isHost = true;
             currentLobbyName = lobbyName;
+            // Seed capacidade localmente para atualizar lista quando visível
+            lobbyMaxPlayers[currentLobbyName] = maxPlayers;
+            if (lobbyItems.TryGetValue(currentLobbyName, out var item) && item != null)
+            {
+                item.UpdateMaxPlayers(maxPlayers);
+            }
             // Evitar múltiplas inscrições duplicadas (já feito em OnEnable)
             webSocket.OnMessageReceived -= OnWebSocketMessage;
             webSocket.OnMessageReceived += OnWebSocketMessage;
             // Envia evento de criação de lobby para o servidor
             webSocket.Send($"{{\"event\":\"match_start\",\"lobby\":\"{lobbyName}\",\"max_players\":{maxPlayers}}}");
+            // Atualiza valor no Core (se existir)
+            var core = ChronoSyncCore.Instance;
+            if (core != null)
+            {
+                core.SetMaxPlayers(maxPlayers);
+            }
             // Abrir painel de membros
             if (membersPanel != null) membersPanel.ShowForLobby(lobbyName);
             if (lobbyBrowserRoot != null) lobbyBrowserRoot.SetActive(false);
@@ -192,6 +296,10 @@ namespace CS.UI
             {
                 Destroy(child.gameObject);
             }
+            // Reset tracked UI and counts
+            lobbyItems.Clear();
+            lobbyCounts.Clear();
+            lobbyMaxPlayers.Clear();
         }
 
         private void UpdateLobbyListUI()
@@ -204,8 +312,14 @@ namespace CS.UI
                 if (lobbyItemScript != null)
                 {
                     lobbyItemScript.Setup(lobby, this);
+                    lobbyItems[lobby] = lobbyItemScript;
+                    // Initialize visible count (0 until server replies)
+                    if (lobbyCounts.TryGetValue(lobby, out var c)) lobbyItemScript.UpdateMemberCount(c); else lobbyItemScript.UpdateMemberCount(0);
+                    if (lobbyMaxPlayers.TryGetValue(lobby, out var mx) && mx > 0) lobbyItemScript.UpdateMaxPlayers(mx);
                 }
             }
+            // Ask server for current members of each lobby to populate counts
+            RequestCountsForVisibleLobbies();
         }
 
         public void JoinLobby(string lobbyName)
@@ -251,10 +365,31 @@ namespace CS.UI
                     {
                         string arrayContent = msg.Substring(start + 1, end - start - 1);
                         var lobbies = new System.Collections.Generic.List<string>();
-                        foreach (var lobby in arrayContent.Split(','))
+                        // If array contains objects, extract name and max_players per entry
+                        if (arrayContent.IndexOf('{') != -1)
                         {
-                            string clean = lobby.Trim().Trim('"');
-                            if (!string.IsNullOrEmpty(clean)) lobbies.Add(clean);
+                            var entries = arrayContent.Split(new string[]{"},{"}, System.StringSplitOptions.RemoveEmptyEntries);
+                            foreach (var e in entries)
+                            {
+                                string block = e;
+                                if (!block.StartsWith("{")) block = "{" + block;
+                                if (!block.EndsWith("}")) block = block + "}";
+                                string name = ExtractJsonValue(block, "name");
+                                if (string.IsNullOrEmpty(name)) name = ExtractJsonValue(block, "lobby");
+                                if (string.IsNullOrEmpty(name)) continue;
+                                lobbies.Add(name);
+                                int mx = ExtractMaxPlayers(block);
+                                if (mx > 0) lobbyMaxPlayers[name] = mx;
+                            }
+                        }
+                        else
+                        {
+                            // Fallback: plain string array
+                            foreach (var lobby in arrayContent.Split(','))
+                            {
+                                string clean = lobby.Trim().Trim('"');
+                                if (!string.IsNullOrEmpty(clean)) lobbies.Add(clean);
+                            }
                         }
                         availableLobbies = lobbies;
                         UpdateLobbyListUI();
@@ -263,10 +398,44 @@ namespace CS.UI
                 catch { }
             }
 
+            // When a full members list arrives for some lobby, update its count (and capacity if present)
+            if (msg.Contains("\"event\":\"lobby_members\""))
+            {
+                string lobby = ExtractJsonValue(msg, "lobby");
+                if (!string.IsNullOrEmpty(lobby))
+                {
+                    int count = CountMembersFromJson(msg);
+                    SetLobbyCount(lobby, count);
+                    int max = ExtractMaxPlayers(msg);
+                    if (max > 0 && lobbyItems.TryGetValue(lobby, out var li) && li != null)
+                    {
+                        li.UpdateMaxPlayers(max);
+                    }
+                }
+            }
+
+            // Incremental updates for counts
+            if (msg.Contains("\"event\":\"player_joined_lobby\""))
+            {
+                string lobby = ExtractJsonValue(msg, "lobby");
+                if (!string.IsNullOrEmpty(lobby)) AdjustLobbyCount(lobby, +1);
+            }
+            if (msg.Contains("\"event\":\"player_left_lobby\""))
+            {
+                string lobby = ExtractJsonValue(msg, "lobby");
+                if (!string.IsNullOrEmpty(lobby)) AdjustLobbyCount(lobby, -1);
+            }
+            if (msg.Contains("\"event\":\"lobby_closed\"") || msg.Contains("\"event\":\"lobby_cancel\""))
+            {
+                string lobby = ExtractJsonValue(msg, "lobby");
+                if (!string.IsNullOrEmpty(lobby)) RemoveLobbyFromList(lobby);
+            }
+
             // Ao receber confirmação de match_start ou join_lobby, configurar lobby no chat e garantir painel aberto
             if (msg.Contains("\"event\":\"match_start\"") || msg.Contains("\"event\":\"join_lobby\""))
             {
                 string lobby = ExtractJsonValue(msg, "lobby");
+                string owner = ExtractJsonValue(msg, "owner_id");
                 var chat = FindObjectOfType<ChronoSyncRCPChat>();
                 if (chat != null && !string.IsNullOrEmpty(lobby))
                 {
@@ -277,6 +446,12 @@ namespace CS.UI
                 {
                     membersPanel.ShowForLobby(lobby);
                     if (lobbyBrowserRoot != null) lobbyBrowserRoot.SetActive(false);
+                }
+                // Sync IsHost when owner info is present
+                if (!string.IsNullOrEmpty(owner) && webSocket != null)
+                {
+                    var localId = string.IsNullOrEmpty(webSocket.assignedPlayerId) ? webSocket.playerId : webSocket.assignedPlayerId;
+                    isHost = !string.IsNullOrEmpty(localId) && string.Equals(localId, owner, System.StringComparison.Ordinal);
                 }
             }
 
@@ -293,6 +468,33 @@ namespace CS.UI
                     {
                         GameSessionManager.Instance.TrySpawnLocal();
                     }
+                }
+            }
+
+            // Capture capacity from match_start to inform other clients' browser
+            if (msg.Contains("\"event\":\"match_start\""))
+            {
+                string lobby = ExtractJsonValue(msg, "lobby");
+                int mx = ExtractMaxPlayers(msg);
+                if (!string.IsNullOrEmpty(lobby) && mx > 0)
+                {
+                    lobbyMaxPlayers[lobby] = mx;
+                    if (lobbyItems.TryGetValue(lobby, out var li) && li != null)
+                    {
+                        li.UpdateMaxPlayers(mx);
+                    }
+                }
+            }
+
+            // If the server kicked this local player from the lobby, immediately return to the lobby browser and notify
+            if (msg.Contains("\"event\":\"remove_from_lobby\""))
+            {
+                string lobby = ExtractJsonValue(msg, "lobby");
+                string pid = ExtractJsonValue(msg, "player_id");
+                var localId = webSocket != null && !string.IsNullOrEmpty(webSocket.assignedPlayerId) ? webSocket.assignedPlayerId : (webSocket != null ? webSocket.playerId : null);
+                if (!string.IsNullOrEmpty(pid) && !string.IsNullOrEmpty(localId) && string.Equals(pid, localId, System.StringComparison.Ordinal))
+                {
+                    ReturnToBrowserDueToKick("Você foi removido do lobby pelo host.");
                 }
             }
         }
@@ -323,6 +525,112 @@ namespace CS.UI
             int end = json.IndexOf("\"", start + 1);
             if (start == -1 || end == -1) return "";
             return json.Substring(start + 1, end - start - 1);
+        }
+
+        private void RequestCountsForVisibleLobbies()
+        {
+            if (webSocket == null || !webSocket.IsConnected) return;
+            for (int i = 0; i < availableLobbies.Count; i++)
+            {
+                var l = availableLobbies[i];
+                if (!string.IsNullOrEmpty(l))
+                {
+                    try
+                    {
+                        webSocket.Send($"{{\"event\":\"request_lobby_members\",\"lobby\":\"{Escape(l)}\"}}");
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        private void SetLobbyCount(string lobby, int count)
+        {
+            if (string.IsNullOrEmpty(lobby)) return;
+            lobbyCounts[lobby] = Math.Max(0, count);
+            if (lobbyItems.TryGetValue(lobby, out var item) && item != null)
+            {
+                item.UpdateMemberCount(lobbyCounts[lobby]);
+            }
+        }
+
+        private void AdjustLobbyCount(string lobby, int delta)
+        {
+            if (string.IsNullOrEmpty(lobby)) return;
+            if (!lobbyCounts.TryGetValue(lobby, out var c)) c = 0;
+            SetLobbyCount(lobby, c + delta);
+        }
+
+        private void RemoveLobbyFromList(string lobby)
+        {
+            if (string.IsNullOrEmpty(lobby)) return;
+            if (lobbyItems.TryGetValue(lobby, out var item) && item != null)
+            {
+                Destroy(item.gameObject);
+            }
+            lobbyItems.Remove(lobby);
+            lobbyCounts.Remove(lobby);
+            availableLobbies.Remove(lobby);
+        }
+
+        private int CountMembersFromJson(string json)
+        {
+            // Try to locate the members array first
+            int idx = json.IndexOf("\"members\":");
+            if (idx == -1) return 0;
+            int arrStart = json.IndexOf('[', idx);
+            int arrEnd = json.IndexOf(']', arrStart + 1);
+            if (arrStart == -1 || arrEnd == -1 || arrEnd <= arrStart) return 0;
+            string inner = json.Substring(arrStart + 1, arrEnd - arrStart - 1);
+            if (string.IsNullOrWhiteSpace(inner)) return 0;
+
+            // If members are objects, count occurrences of "player_id"
+            if (inner.IndexOf("\"player_id\"") != -1)
+            {
+                int count = 0;
+                int search = 0;
+                while (true)
+                {
+                    int hit = inner.IndexOf("\"player_id\"", search);
+                    if (hit == -1) break;
+                    count++;
+                    search = hit + 10;
+                }
+                return count;
+            }
+
+            // Otherwise, assume array of strings and count quoted entries
+            int n = 0;
+            var parts = inner.Split(',');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                var t = parts[i].Trim();
+                if (t.Length >= 2 && t[0] == '"' && t[t.Length - 1] == '"') n++;
+            }
+            return n;
+        }
+
+        private int ExtractMaxPlayers(string json)
+        {
+            // try locate "max_players":<number>
+            int idx = json.IndexOf("\"max_players\":");
+            if (idx == -1) return 0;
+            int start = idx + "\"max_players\":".Length;
+            // read until next comma or closing brace
+            int endComma = json.IndexOf(',', start);
+            int endBrace = json.IndexOf('}', start);
+            int end = (endComma == -1) ? endBrace : ((endBrace == -1) ? endComma : Mathf.Min(endComma, endBrace));
+            if (end == -1) end = json.Length;
+            var numStr = json.Substring(start, end - start).Trim().Trim('"');
+            // Be tolerant of potential quotes or whitespace
+            if (int.TryParse(numStr, out var value)) return value;
+            return 0;
+        }
+
+        private string Escape(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return string.Empty;
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
     }
 }
