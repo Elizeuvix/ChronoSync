@@ -1,0 +1,37 @@
+# Normalize line endings for text files (Windows devs)
+* text=auto eol=crlf
+
+# Unity-specific binary files (prevent diffs/merges)
+*.unity binary
+*.prefab binary
+*.asset binary
+*.mat binary
+*.fbx binary
+*.psd binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.tga binary
+*.wav binary
+*.ogg binary
+*.mp3 binary
+*.mesh binary
+*.anim binary
+*.controller binary
+*.shadergraph binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.terrainlayer binary
+
+# Scripts and text should stay text
+*.cs text diff=csharp
+*.shader text
+*.cginc text
+*.hlsl text
+*.json text
+*.yml text
+*.yaml text
+*.xml text
+*.txt text
+*.md text

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using CS.Core.Networking;
+using CS.Core.Config;
 
 namespace CS.Core.Systems
 {
@@ -16,10 +17,14 @@ namespace CS.Core.Systems
     {
         public static ChronoSyncCore Instance { get; private set; }
 
-        [Header("Room Config")]
+    [Header("Room Config")]
         [SerializeField] private string roomName = string.Empty;
         [SerializeField] [Min(1)] private int maxPlayers = 2;
         [SerializeField] [ReadOnlyInspector] private int playerCount = 0; // derivado da lista de membros
+
+    [Header("Config Defaults")]
+    [Tooltip("Apply defaults from ChronoSyncConfig when scene/inspector values are empty.")]
+    [SerializeField] private bool applyDefaultsFromConfig = true;
 
         [Header("References (auto)")]
         [SerializeField] private GameSessionManager gameSessionManager;
@@ -57,6 +62,13 @@ namespace CS.Core.Systems
         {
             if (gameSessionManager == null) gameSessionManager = GameSessionManager.Instance ?? FindObjectOfType<GameSessionManager>();
             if (webSocket == null) webSocket = FindObjectOfType<ChronoSyncRCPWebSocket>();
+
+            if (applyDefaultsFromConfig)
+            {
+                // Apply default values if not set in scene
+                if (string.IsNullOrEmpty(roomName)) roomName = ChronoSyncConfig.DEFAULT_ROOM_NAME;
+                if (maxPlayers < 1) maxPlayers = Mathf.Max(1, ChronoSyncConfig.DEFAULT_MAX_PLAYERS);
+            }
 
             if (gameSessionManager != null)
             {
