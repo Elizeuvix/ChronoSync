@@ -53,6 +53,17 @@ namespace CS.UI
             if (auth == null) auth = FindObjectOfType<ChronoSyncRCPAuth>();
             if (auth == null) Debug.LogError("[AuthUI] Componente ChronoSyncRCPAuth não encontrado na cena. Adicione-o ao mesmo GameObject do AuthUI ou a outro GameObject.");
 
+            // Hint visível no Console para confirmar endpoints usados
+            if (auth != null)
+            {
+                Debug.Log($"[AuthUI] API URL atual: {auth.apiUrl}");
+            }
+            if (webSocket != null)
+            {
+                var mode = string.IsNullOrWhiteSpace(webSocket.wsUrl) ? "auto-derivado do API URL" : $"manual: {webSocket.wsUrl}";
+                Debug.Log($"[AuthUI] WS URL: {mode}");
+            }
+
             // Protege assinatura de botões
             if (registerButton != null) registerButton.onClick.AddListener(OnRegister); else Debug.LogWarning("[AuthUI] registerButton não atribuído.");
             if (loginButton != null) loginButton.onClick.AddListener(OnLogin); else Debug.LogWarning("[AuthUI] loginButton não atribuído.");
@@ -79,7 +90,10 @@ namespace CS.UI
             if (success)
                 SetStatus($"Player '{upperLogin}' cadastrado no servidor!");
             else
-                SetStatus($"Erro ao cadastrar '{upperLogin}'. Tente outro nome ou verifique a conexão.");
+            {
+                var detail = string.IsNullOrEmpty(auth.lastError) ? string.Empty : $"\n{auth.lastError}";
+                SetStatus($"Erro ao cadastrar '{upperLogin}'. Tente outro nome ou verifique a conexão.{detail}");
+            }
         }
 
         async void OnLogin()
@@ -135,7 +149,10 @@ namespace CS.UI
                 }
             }
             else
-                SetStatus($"Erro ao logar '{upperLogin}'. Verifique usuário/senha ou tente novamente.");
+            {
+                var detail = string.IsNullOrEmpty(auth.lastError) ? string.Empty : $"\n{auth.lastError}";
+                SetStatus($"Erro ao logar '{upperLogin}'. Verifique usuário/senha ou tente novamente.{detail}");
+            }
         }
 
         private string GetUsernameText()

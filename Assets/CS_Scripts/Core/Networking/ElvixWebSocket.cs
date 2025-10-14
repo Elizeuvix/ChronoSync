@@ -12,7 +12,7 @@ namespace CS.Core.Networking
 {
     public class ElvixWebSocket : MonoBehaviour
     {
-        public string wsUrl = "ws://localhost:8000/ws/game";
+    public string wsUrl = "ws://192.168.3.196:8000/ws/game";
         public bool IsConnected { get; private set; }
         public bool AutoReconnect = true;
 

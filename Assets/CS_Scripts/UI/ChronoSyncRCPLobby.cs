@@ -232,6 +232,8 @@ namespace CS.UI
                 Debug.LogWarning("[ChronoSyncRCPLobby] Nenhum campo de nome de lobby atribuído ou vazio (TMP_InputField ou InputField).");
                 return;
             }
+            // Escape JSON-sensitive chars
+            lobbyName = Escape(lobbyName.Trim());
             // Ler MaxPlayers a partir dos campos configurados (TMP ou UGUI)
             bool foundMax = false;
             if (maxPlayersTMP != null)
@@ -263,6 +265,14 @@ namespace CS.UI
                 return;
             }
 
+            // Garantir que identidade foi atribuída pelo servidor antes de criar lobby
+            if (string.IsNullOrEmpty(webSocket.assignedPlayerId))
+            {
+                Debug.LogWarning("[ChronoSyncRCPLobby] assignedPlayerId ainda não recebido; aguardando antes de enviar match_start...");
+                StartCoroutine(WaitIdentityAndCreate(lobbyName, maxPlayers));
+                return;
+            }
+
             if (statusText != null)
                 statusText.text = $"Lobby '{lobbyName}' criado. Aguardando outro jogador...";
             isHost = true;
@@ -277,7 +287,12 @@ namespace CS.UI
             webSocket.OnMessageReceived -= OnWebSocketMessage;
             webSocket.OnMessageReceived += OnWebSocketMessage;
             // Envia evento de criação de lobby para o servidor
-            webSocket.Send($"{{\"event\":\"match_start\",\"lobby\":\"{lobbyName}\",\"max_players\":{maxPlayers}}}");
+            var payload = $"{{\"event\":\"match_start\",\"lobby\":\"{lobbyName}\",\"max_players\":{maxPlayers}}}";
+            if (webSocket is ChronoSyncRCPWebSocket wsExt && wsExt.verboseLogging)
+                wsExt.SendLogged(payload);
+            else
+                webSocket.Send(payload);
+            StartCoroutine(WaitMatchStartConfirmation(lobbyName, maxPlayers));
             // Atualiza valor no Core (se existir)
             var core = ChronoSyncCore.Instance;
             if (core != null)
@@ -287,6 +302,65 @@ namespace CS.UI
             // Abrir painel de membros
             if (membersPanel != null) membersPanel.ShowForLobby(lobbyName);
             if (lobbyBrowserRoot != null) lobbyBrowserRoot.SetActive(false);
+        }
+
+        private System.Collections.IEnumerator WaitIdentityAndCreate(string lobbyName, int maxPlayers)
+        {
+            float start = Time.realtimeSinceStartup;
+            while (string.IsNullOrEmpty(webSocket.assignedPlayerId) && Time.realtimeSinceStartup - start < 5f)
+            {
+                yield return null;
+            }
+            if (!string.IsNullOrEmpty(webSocket.assignedPlayerId))
+            {
+                Debug.Log("[ChronoSyncRCPLobby] Identidade confirmada; enviando match_start atrasado.");
+                CreateLobby(); // re-enter; will pass identity check now
+            }
+            else
+            {
+                if (statusText != null) statusText.text = "Falha: identidade não confirmada.";
+                isHost = false; currentLobbyName = string.Empty;
+            }
+        }
+
+        private System.Collections.IEnumerator WaitMatchStartConfirmation(string lobbyName, int maxPlayers)
+        {
+            float start = Time.realtimeSinceStartup;
+            bool confirmed = false;
+            while (Time.realtimeSinceStartup - start < 5f)
+            {
+                if (!string.IsNullOrEmpty(currentLobbyName) && string.Equals(currentLobbyName, lobbyName, StringComparison.Ordinal))
+                {
+                    // Recebemos algum evento que manteve o lobby atual; tentativa de confirmar match_start
+                    confirmed = true; break;
+                }
+                yield return null;
+            }
+            if (!confirmed)
+            {
+                Debug.LogWarning("[ChronoSyncRCPLobby] match_start não confirmado em 5s; tentando fallback create_lobby.");
+                var fallback = $"{{\"event\":\"create_lobby\",\"lobby\":\"{lobbyName}\",\"max_players\":{maxPlayers}}}";
+                if (webSocket is ChronoSyncRCPWebSocket wsExt && wsExt.verboseLogging)
+                    wsExt.SendLogged(fallback);
+                else
+                    webSocket.Send(fallback);
+                // Espera mais um pouco por qualquer confirmação
+                float start2 = Time.realtimeSinceStartup;
+                while (Time.realtimeSinceStartup - start2 < 5f)
+                {
+                    if (!string.IsNullOrEmpty(currentLobbyName) && string.Equals(currentLobbyName, lobbyName, StringComparison.Ordinal))
+                    { confirmed = true; break; }
+                    yield return null;
+                }
+                if (!confirmed)
+                {
+                    Debug.LogError("[ChronoSyncRCPLobby] Criação de lobby não confirmada. Revertendo estado.");
+                    isHost = false; currentLobbyName = string.Empty;
+                    if (membersPanel != null) membersPanel.Hide();
+                    if (lobbyBrowserRoot != null) lobbyBrowserRoot.SetActive(true);
+                    if (statusText != null) statusText.text = "Falha ao criar lobby.";
+                }
+            }
         }
 
         private void ClearLobbyListUI()
@@ -497,6 +571,14 @@ namespace CS.UI
                     ReturnToBrowserDueToKick("Você foi removido do lobby pelo host.");
                 }
             }
+
+            // New authoritative target-only event from server when you are kicked
+            if (msg.Contains("\"event\":\"kicked_from_lobby\""))
+            {
+                string reason = ExtractJsonValue(msg, "reason");
+                string text = string.IsNullOrEmpty(reason) ? "Você foi removido do lobby pelo host." : TranslateKickReason(reason);
+                ReturnToBrowserDueToKick(text);
+            }
         }
 
         // Classe de payload antiga removida (não utilizada)
@@ -525,6 +607,16 @@ namespace CS.UI
             int end = json.IndexOf("\"", start + 1);
             if (start == -1 || end == -1) return "";
             return json.Substring(start + 1, end - start - 1);
+        }
+
+        private string TranslateKickReason(string reason)
+        {
+            switch (reason)
+            {
+                case "kicked_by_host": return "Você foi removido do lobby pelo host.";
+                case "left": return "Você saiu do lobby.";
+                default: return "Você foi removido do lobby.";
+            }
         }
 
         private void RequestCountsForVisibleLobbies()

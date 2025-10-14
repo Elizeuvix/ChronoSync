@@ -55,6 +55,8 @@ MonoBehaviour:
   applyDefaultsFromConfig: 1
   gameSessionManager: {fileID: 0}
   webSocket: {fileID: 0}
+  lobbyOwnerId: 
+  isInRoom: 0
 --- !u!114 &5424379098993443434
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -109,7 +111,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1fcfc5db9979d094c8211c4f8b981a5b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  apiUrl: http://localhost:8000
+  apiUrl: http://localhost:8100
 --- !u!114 &8076520562173265452
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -122,7 +124,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: a64a64d62d2d36d4b9122a2df01d3b39, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  wsUrl: ws://localhost:8000/ws/game
+  wsUrl: ws://localhost:8100/ws/game
   AutoReconnect: 1
   playerId: player1
   displayName: 

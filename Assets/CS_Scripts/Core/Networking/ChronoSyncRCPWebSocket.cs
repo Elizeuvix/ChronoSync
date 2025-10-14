@@ -2,6 +2,7 @@
 using UnityEngine;
 using System;
 using CS.Core.Config;
+using CS.Core.Auth;
 
 namespace CS.Core.Networking
 {
@@ -14,13 +15,53 @@ namespace CS.Core.Networking
         public string displayName = "";
         [Tooltip("ID atribuído pelo servidor a esta conexão")] public string assignedPlayerId = "";
 
+        [Header("Connection")]
+        [Tooltip("Se true e wsUrl estiver vazio, será derivado do apiUrl do ChronoSyncRCPAuth (http->ws + /ws/game)")]
+        public bool autoDeriveWsUrl = true;
+        [Tooltip("Caminho do endpoint WS quando derivar automaticamente")] public string wsPath = "/ws/game";
+
+    [Header("Security")]
+    [Tooltip("Override para a API key do desenvolvedor usada no WebSocket (se vazio, usa ChronoSyncConfig.API_KEY)")]
+    public string apiKeyOverride = "";
+
+    [Header("Diagnostics")] public bool verboseLogging = true;
+    private readonly System.Collections.Generic.Queue<string> lastSentQueue = new System.Collections.Generic.Queue<string>();
+    private const int MaxBufferedMessages = 10;
+    public string lastSentMessage = string.Empty;
+
         // Dispara quando a identidade está pronta para uso (id atribuído pelo servidor e, opcionalmente, displayName preenchido)
         public event Action<string, string> OnIdentityReady;
         // Conecta e identifica o jogador quando a conexão estiver ativa
         void Start()
         {
+            // Derivar wsUrl do config global/ apiUrl do Auth quando não configurado explicitamente
+            if (string.IsNullOrWhiteSpace(wsUrl) && !string.IsNullOrWhiteSpace(ChronoSyncConfig.WS_URL))
+            {
+                wsUrl = ChronoSyncConfig.WS_URL.Trim();
+            }
+            if (autoDeriveWsUrl && string.IsNullOrWhiteSpace(wsUrl))
+            {
+                var auth = FindObjectOfType<ChronoSyncRCPAuth>();
+                if (auth != null && !string.IsNullOrWhiteSpace(auth.apiUrl))
+                {
+                    try
+                    {
+                        var uriHttp = new Uri(auth.apiUrl);
+                        var scheme = uriHttp.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ? "wss" : "ws";
+                        var builder = new UriBuilder(uriHttp) { Scheme = scheme };
+                        // UriBuilder mantém porta; adiciona caminho
+                        var basePath = string.IsNullOrEmpty(builder.Path) || builder.Path == "/" ? string.Empty : builder.Path.TrimEnd('/');
+                        builder.Path = basePath + (wsPath.StartsWith("/") ? wsPath : "/" + wsPath);
+                        wsUrl = builder.Uri.ToString();
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"[WS] Falha ao derivar wsUrl de {auth.apiUrl}: {e.Message}");
+                    }
+                }
+            }
             // Append API key from developer-defined config (not PlayerPrefs)
-            var apiKey = ChronoSyncConfig.API_KEY;
+            var apiKey = string.IsNullOrEmpty(apiKeyOverride) ? ChronoSyncConfig.API_KEY : apiKeyOverride;
             if (!string.IsNullOrEmpty(apiKey) && !wsUrl.Contains("key="))
             {
                 // Use System.Uri to escape without depending on UnityWebRequest module
@@ -28,7 +69,7 @@ namespace CS.Core.Networking
             }
             OnConnected += () =>
             {
-                Debug.Log("ChronoSyncRCPWebSocket conectado!");
+                Debug.Log($"ChronoSyncRCPWebSocket conectado em {wsUrl}!");
                 // Do not identify or send player-related events until API provides an id
             };
             OnMessageReceived += (msg) =>
@@ -102,10 +143,29 @@ namespace CS.Core.Networking
             if (!string.IsNullOrEmpty(displayName))
             {
                 var escapedName = Escape(displayName);
-                Send($"{{\"event\":\"set_display_name\",\"display_name\":\"{escapedName}\"}}");
+                SendLogged($"{{\"event\":\"set_display_name\",\"display_name\":\"{escapedName}\"}}");
             }
             // Notificar ouvintes que a identidade está pronta (id + nome atual se houver)
             OnIdentityReady?.Invoke(assignedPlayerId, displayName);
+        }
+
+        public new void Send(string message)
+        {
+            base.Send(message);
+        }
+
+        public void SendLogged(string message)
+        {
+            lastSentMessage = message;
+            lastSentQueue.Enqueue(message);
+            while (lastSentQueue.Count > MaxBufferedMessages) lastSentQueue.Dequeue();
+            if (verboseLogging) Debug.Log($"[WS ->] {message}");
+            base.Send(message);
+        }
+
+        public string GetRecentSentMessages()
+        {
+            return string.Join("\n", lastSentQueue.ToArray());
         }
 
         private string ExtractJsonValue(string json, string key)
